@@ -1,0 +1,274 @@
+class Tileborn {
+    constructor() {
+        this.tileMaps = new Map();
+        this.registry = tilebornSystem.registry;
+        this.registryMap = {
+            tile: {
+                nameToId: new Map(),
+                idToDef: []
+            },
+            tileState: new Map()
+        };
+        this.event = new EchoLiveEventManager({
+            load_map: {},
+            tile_update: {}
+        });
+
+        this.on     = this.event.on;
+        this.once   = this.event.once;
+        this.off    = this.event.off;
+
+        this.init();
+    }
+
+    init() {
+        this.#serializationData();
+        this.createMap('example');
+    }
+
+    #serializationData() {
+        this.registryMap.tile.idToDef = this.registry.getRegistryArray('tile');
+        this.registryMap.tile.idToDef.forEach((e, i) => {
+            this.registryMap.tile.nameToId.set(e.name, i);
+        });
+        this.registry.forEach('tile_state', e => {
+            let tileStateDef = {};
+            let tileStateDefaultValue = {};
+            for (const key in e.value) {
+                if (!Object.hasOwn(e.value, key)) continue;
+                const element = e.value[key];
+                let tileStateValueDef = this.registry.getRegistryValue('tile_state_value', element);
+                if (tileStateValueDef === undefined) {
+                    throw new Error(
+                        `Invalid reference "${element}" for state "${key}"`
+                    );
+                }
+                tileStateDef[key] = tileStateValueDef.value;
+                tileStateDefaultValue[key] = tileStateValueDef.default_value;
+            }
+            this.registryMap.tileState.set(e.name, new TileState(tileStateDef, tileStateDefaultValue));
+        });
+    }
+
+    createMap(name, size = [16, 16]) {
+        if (this.tileMaps.get(name) !== undefined) return;
+        const map = new TilebornMap(this, name, size);
+        this.tileMaps.set(name, map);
+        return map;
+    }
+
+    loadMap(name) {
+        const map = this.tileMaps.get(name);
+        if (map === undefined) return;
+        this.event.emit('load_map', map.getMap());
+    }
+
+    getTileId(name) {
+        let key = EchoLiveData.filter('namespace_id', 'pad_namespace', name)
+        return this.registryMap.tile.nameToId.get(key);
+    }
+
+    getTileData(id) {
+        return this.registryMap.tile.idToDef[id];
+    }
+
+    getTileState(name) {
+        return this.registryMap.tileState.get(name);
+    }
+}
+
+class TilebornMap {
+    constructor(tileborn, name, size = [16, 16]) {
+        this.tileborn = tileborn;
+        this.name = name;
+        this.size = size;
+        this.tiles = new Uint16Array(size[0] * size[1]);
+        this.states = new Uint16Array(size[0] * size[1]);
+        this.payloads = new Map();
+    }
+
+    get width() {
+        return this.size[0];
+    }
+
+    get height() {
+        return this.size[1];
+    }
+
+    get length() {
+        return this.size[0] * this.size[1];
+    }
+
+    posToIndex(pos = []) {
+        const [ posX, posY ] = pos;
+        return Math.max(Math.min(posY, this.height - 1), 0) * this.width + Math.max(Math.min(posX, this.width - 1), 0);
+    }
+
+    indexToPos(index) {
+        if (index > this.length || index < 0) return;
+        const posX = index % this.width;
+        const posY = Math.floor( index / this.width );
+        return [posX, posY];
+    }
+
+    getTile(pos = []) {
+        const index = typeof pos === 'number' ? pos : this.posToIndex(pos);
+        const id = this.tiles[index];
+        const stateId = this.states[index];
+        const data = this.tileborn.getTileData(id);
+        const name = data.name;
+        const state = this.tileborn.getTileState(name)?.getState(stateId);
+        return {
+            index,
+            id,
+            stateId,
+            name,
+            state,
+            color: data.color,
+            pos: {
+                x: pos[0],
+                y: pos[1],
+            }
+        }
+    }
+
+    getMap() {
+        const tileMap = [];
+        for (let i = 0; i < this.length; i++) {
+            tileMap.push(this.getTile(i));
+        }
+        return {
+            name: this.name,
+            size: {
+                width: this.width,
+                height: this.height
+            },
+            map: tileMap
+        };
+    }
+
+    setTile(pos = [], name, state) {
+        const id = typeof name === 'number' ? name : this.tileborn.getTileId(name);
+        if (typeof id !== 'number') return;
+        const data = this.tileborn.getTileData(id);
+        const index = this.posToIndex(pos);
+        this.tiles[index] = id;
+        if (typeof data.states === 'string') {
+            const stateObj = this.tileborn.getTileState(data.states);
+            this.states[index] = state !== undefined ? stateObj.getId(state) : stateObj.defaultId;
+        }
+
+        this.tileborn.event.emit('tile_update', this.getTile(pos));
+
+        return {
+            pos,
+            index,
+            name,
+            id,
+            stateId: this.states[index]
+        }
+    }
+
+    fillTile(pos1 = [], pos2 = [], name) {
+        const id = typeof name === 'number' ? name : this.tileborn.getTileId(name);
+        if (typeof id !== 'number') return;
+
+        const [ pos1X, pos1Y ] = pos1;
+        const [ pos2X, pos2Y ] = pos2;
+        const startX = Math.min(pos1X, pos2X);
+        const startY = Math.min(pos1Y, pos2Y);
+        const lengthX = Math.abs(pos1X - pos2X);
+        const lengthY = Math.abs(pos1Y - pos2Y);
+
+        for (let i = startY; i <= startY + lengthY; i++) {
+            let startIndex = this.posToIndex([startX, i]);
+            this.tiles.fill(id, startIndex, startIndex + lengthX + 1);
+        }
+    }
+}
+
+class TileState {
+    #keys;
+    #valueMaps;
+    #radixes;
+    #stateCount;
+
+    constructor(definition, defaultValue) {
+        this.#keys = Object.keys(definition).sort();
+        this.#valueMaps = new Map();
+        this.#radixes = [];
+        this.defaultId = 0;
+
+        let multiplier = 1;
+
+        for (const key of this.#keys) {
+            const values = [...definition[key]].sort();
+            const valueToIndex = new Map();
+
+            values.forEach((value, index) => {
+                valueToIndex.set(value, index);
+            });
+
+            this.#valueMaps.set(key, {
+                values,
+                valueToIndex
+            });
+
+            this.#radixes.push(multiplier);
+            multiplier *= values.length;
+        }
+
+        this.#stateCount = multiplier;
+
+        if (typeof defaultValue === 'object') this.defaultId = this.getId(defaultValue);
+    }
+
+    get stateCount() {
+        return this.#stateCount;
+    }
+
+    /**
+     * 状态对象 -> 状态ID
+     */
+    getId(state) {
+        let id = 0;
+
+        for (let i = 0; i < this.#keys.length; i++) {
+            const key = this.#keys[i];
+            const value = state[key];
+            const map = this.#valueMaps.get(key);
+            const valueIndex = map.valueToIndex.get(value);
+
+            if (valueIndex === undefined) {
+                throw new Error(
+                    `Invalid value "${value}" for state "${key}"`
+                );
+            }
+
+            id += valueIndex * this.#radixes[i];
+        }
+
+        return id;
+    }
+
+    /**
+     * 状态ID -> 状态对象
+     */
+    getState(id) {
+        if (id < 0 || id >= this.#stateCount) {
+            throw new Error(`Invalid state id: ${id}`);
+        }
+
+        const result = {};
+
+        for (let i = 0; i < this.#keys.length; i++) {
+            const key = this.#keys[i];
+            const map = this.#valueMaps.get(key);
+            const radix = this.#radixes[i];
+            const valueIndex = Math.floor(id / radix) % map.values.length;
+            result[key] = map.values[valueIndex];
+        }
+
+        return result;
+    }
+}

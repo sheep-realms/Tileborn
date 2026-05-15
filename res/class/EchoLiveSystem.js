@@ -1,0 +1,1563 @@
+/* ============================================================
+ * Echo-Live
+ * Github: https://github.com/sheep-realms/Echo-Live
+ * License: GNU General Public License 3.0
+ * ============================================================
+ */
+
+
+class EchoLiveSystem {
+    constructor() {
+        this.mixer      = undefined;
+        this.registry   = new EchoLiveRegistry();
+        this.loader     = new ResourceLoader(this);
+        this.hook       = new EchoLiveHook();
+        this.config     = undefined;
+        this.modules    = [];
+        this.moduleLookupQueue = new Map();
+        this.lastModuleIndex = 0;
+
+        this.setupModules({
+            registry: this.registry,
+            resource_loader: this.loader,
+            hook: this.hook,
+        });
+
+        this.hook.trigger('system_init', {
+            unit: this
+        });
+    }
+
+    static async getHash(content) {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(content);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        const hashHex = hashArray.map(byte => byte.toString(16).padStart(2, '0')).join('');
+        return hashHex;
+    }
+
+    /**
+     * 安装模块
+     * @param {String} name 模块名称
+     * @param {Object|Function} object 模块对象
+     */
+    setupModule(name, object) {
+        if (typeof object !== 'object' && typeof object !== 'function') {
+            console.warn(`[EchoLiveSystem] Setup Module Exception: "${ name }" is not object or function`);
+            return;
+        }
+
+        const index = this.lastModuleIndex++
+        this.modules.push({
+            index: index,
+            name: name,
+            payload: object
+        });
+
+        if (this._hasModuleLookupQueue(name)) {
+            setTimeout(() => this._resolveModuleLookupQueue(name, object, index));
+        }
+
+        return index;
+    }
+
+    /**
+     * 安装多个模块
+     * @param {Object} list 模块键值对
+     */
+    setupModules(list) {
+        let indexTable = {};
+        for (const key in list) {
+            if (!Object.hasOwn(list, key)) continue;
+            const e = list[key];
+            const r = this.setupModule(key, e);
+            indexTable[key] = r;
+        }
+    }
+
+    _addModuleLookupQueue(key, data) {
+        let queue = this.moduleLookupQueue.get(key) ?? [];
+
+        if (data.handlerId !== undefined) {
+            const i = queue.findIndex(e => e.handlerId === data.handlerId);
+            queue[i] = data;
+        } else {
+            queue.push(data);
+        }
+
+        this.moduleLookupQueue.set(key, queue);
+    }
+
+    _hasModuleLookupQueue(key) {
+        return this.moduleLookupQueue.has(key);
+    }
+
+    _resolveModuleLookupQueue(key, payload, index) {
+        const data = this.moduleLookupQueue.get(key);
+        this.moduleLookupQueue.delete(key);
+        data.forEach(e => {
+            e.handler(payload, index);
+        });
+    }
+
+    /**
+     * 联络模块
+     * @param {String} name 模块名称
+     * @param {Function} callback 回调函数
+     * @returns {Object|undefined} 请求载荷
+     */
+    lookup(name, callback = () => {}) {
+        const data = this.modules.find(e => e.name === name);
+        if (data === undefined) return;
+        callback(data.payload, data.index);
+        return data.payload;
+    }
+
+    /**
+     * 异步联络模块
+     * @param {String} name 模块名称
+     * @param {String} handlerId Handler ID（用于覆写）
+     * @returns {Promise} Promise
+     */
+    async lookupAsync(name, handlerId) {
+        return new Promise((resolve, reject) => {
+            const payload = this.lookup(name);
+            if (payload !== undefined) {
+                resolve(payload);
+            } else {
+                this._addModuleLookupQueue(name, {
+                    handlerId: handlerId,
+                    handler: payload => resolve(payload)
+                });
+            }
+        });
+    }
+
+    experimentalFlagCheck(name = '') {
+        if (this.config?.experimental_flag === undefined) return false;
+        if (typeof this.config.experimental_flag[name] !== 'boolean') return false;
+        return this.config.experimental_flag[name];
+    }
+}
+
+class EchoLiveEventManager {
+    constructor(eventConfig = {}) {
+        this._config        = Object.create(null);
+        this._events        = Object.create(null);
+        this._deferredQueue = Object.create(null);
+
+        for (const [eventName, config] of Object.entries(eventConfig)) {
+            this._config[eventName] = {
+                defer: false,
+                ...config
+            };
+            this._events[eventName] = [];
+            this._deferredQueue[eventName] = [];
+        }
+
+        this.on     = this.on.bind(this);
+        this.once   = this.once.bind(this);
+        this.off    = this.off.bind(this);
+        this.emit   = this.emit.bind(this);
+        this.clear  = this.clear.bind(this);
+    }
+
+    _assertEventExists(eventName) {
+        if (!this._config[eventName]) {
+            throw new Error(`Undefined Event: ${eventName}`);
+        }
+    }
+
+    /**
+     * 绑定事件
+     * @param {String} eventName 事件名称
+     * @param {Function} callback 回调
+     * @returns {Function} 解绑函数
+     */
+    on(eventName, callback) {
+        this._assertEventExists(eventName);
+        const listener = {
+            callback,
+            once: false
+        };
+        this._events[eventName].push(listener);
+        this._flushDeferred(eventName);
+        return () => this.off(eventName, callback);
+    }
+
+    /**
+     * 绑定一次性事件
+     * @param {String} eventName 事件名称
+     * @param {Function} callback 回调
+     * @returns {Function} 解绑函数
+     */
+    once(eventName, callback) {
+        this._assertEventExists(eventName);
+        const listener = {
+            callback,
+            once: true
+        };
+        this._events[eventName].push(listener);
+        this._flushDeferred(eventName);
+        return () => this.off(eventName, callback);
+    }
+
+    /**
+     * 解绑事件
+     * @param {String} eventName 事件名称
+     * @param {Function} callback 回调
+     */
+    off(eventName, callback) {
+        this._assertEventExists(eventName);
+        const listeners = this._events[eventName];
+        this._events[eventName] = listeners.filter(
+            listener => listener.callback !== callback
+        );
+    }
+
+    /**
+     * 清空绑定
+     * @param {String} eventName 事件名称
+     * @param {Object} [options] 选项
+     * @param {Boolean} options.clearDeferred 清空延后触发队列
+     */
+    clear(eventName, options = {}) {
+        this._assertEventExists(eventName);
+        this._events[eventName].length = 0;
+        if (options.clearDeferred) {
+            this._deferredQueue[eventName].length = 0;
+        }
+    }
+
+    /**
+     * 触发事件
+     * @param {String} eventName 事件名称
+     * @param  {...any} [args] 参数
+     */
+    emit(eventName, ...args) {
+        this._assertEventExists(eventName);
+        const listeners = this._events[eventName];
+        if (listeners.length === 0) {
+            if (this._config[eventName].defer) {
+                this._deferredQueue[eventName].push(args);
+            }
+            return;
+        }
+        this._invokeListeners(eventName, args);
+    }
+
+    _invokeListeners(eventName, args) {
+        const listeners = this._events[eventName];
+        const remaining = [];
+
+        for (const listener of listeners) {
+            listener.callback(...args);
+            if (!listener.once) {
+                remaining.push(listener);
+            }
+        }
+
+        this._events[eventName] = remaining;
+    }
+
+    _flushDeferred(eventName) {
+        const queue = this._deferredQueue[eventName];
+        if (queue.length === 0) {
+            return;
+        }
+
+        while (queue.length > 0 && this._events[eventName].length > 0) {
+            const args = queue.shift();
+            this._invokeListeners(eventName, args);
+        }
+    }
+}
+
+class EchoLiveData {
+    constructor() {}
+
+    static dataType = {
+        namespace_id: {
+            type: 'string',
+            regexp: /^[^:]+(:[^:]+)+$/,
+            filter: {
+                pad_namespace:  (v, unit, data) => unit.check() ? v : ( data?.namespace ? data.namespace : 'tileborn' ) + ':' + v,
+                get_namespace:  (v, unit)       => unit.check() ? v.split(':')[0] : '',
+                get_id:         (v, unit)       => unit.check() ? v.split(':').slice(1).join(':') : v
+            }
+        }
+    };
+
+    static check(type, value) {
+        if (EchoLiveData.dataType[type] === undefined) return false;
+        if (typeof value !== EchoLiveData.dataType[type].type) return false;
+        return EchoLiveData.dataType[type].regexp.test(value);
+    }
+
+    static filter(type, filterName, value, data = {}, strictMode = false) {
+        if (
+            EchoLiveData.dataType[type] === undefined
+            || typeof value !== EchoLiveData.dataType[type].type
+            || EchoLiveData.dataType[type].filter === undefined
+            || typeof EchoLiveData.dataType[type].filter[filterName] !== 'function'
+        ) return strictMode ? undefined : value;
+        return EchoLiveData.dataType[type].filter[filterName](value, new EchoLiveDataUnit(type, value, filterName), data);
+    }
+}
+
+class EchoLiveDataUnit {
+    constructor(type, value, filterName) {
+        this.type = type;
+        this.value = value;
+        this.filterName = filterName;
+    }
+
+    check(value = this.value) {
+        return EchoLiveData.check(this.type, value);
+    }
+
+    filter(filter, value = this.value, data = {}, strictMode = false) {
+        if (filter === this.filterName) return;
+        return EchoLiveData.check(this.type, filter, value, data, strictMode);
+    }
+}
+
+class EchoLiveRegistry {
+    constructor() {
+        this.registry = new Map();
+        this.registryHashCache = new Map();
+        this.syncRegistryHashCache = undefined;
+        this.isFunctionRegistryCache = {};
+        this.initialized = false;
+        this.loadedRegistry = new Set();
+        this.extensionLoadQueue = new Map();
+        this.event = {
+            loadedRegistry: [],
+            setRegistryValue: []
+        };
+        this.lastTriggerID = 0;
+
+        this.createRegistry('root');
+    }
+
+    /**
+     * 初始化
+     */
+    init(data = []) {
+        if (this.initialized) return;
+        // 用注册表注册注册表
+        this.loadRegistry('root', 'name', data);
+        data.forEach(e => this.createRegistry(e.name));
+        this.initialized = true;
+    }
+
+    // 注册表数量
+    get registryCount() {
+        return this.registry.size;
+    }
+
+    // 注册表项数量
+    get itemCount() {
+        let count = 0;
+        this.registry.forEach(e => count += e.size);
+        return count;
+    }
+
+    /**
+     * 深度合并对象
+     * @param {Object} target 目标对象
+     * @param {Object} source 来源对象
+     * @returns {Object} 合并结果
+     */
+    static __deepMerge(target, source) {
+        target = JSON.parse(JSON.stringify(target));
+        for (let key in source) {
+            if (
+                source[key] instanceof Object &&
+                !Array.isArray(source[key]) &&
+                key in target &&
+                target[key] instanceof Object &&
+                !Array.isArray(target[key]) 
+            ) {
+                target[key] = EchoLiveRegistry.__deepMerge(target[key], source[key]);
+            } else if (Array.isArray(source[key]) && key in target && Array.isArray(target[key])) {
+                target[key] = target[key].concat(source[key]);
+            } else if (source[key] !== undefined) {
+                target[key] = source[key];
+            }
+        }
+        return target;
+    }
+
+    onLoadedRegistry(table = '*', action = () => {}) {
+        if (table !== '*') table = EchoLiveData.filter('namespace_id', 'pad_namespace', table);
+        const id = this.lastTriggerID++;
+        this.event.loadedRegistry.push({
+            id: id,
+            table: table,
+            action: action
+        });
+        if (table !== '*') {
+            const reg = this.getRegistryArray(table);
+            if (reg.length > 0) action(table, this.getRegistry(table));
+        }
+        return id;
+    }
+
+    /**
+     * 绑定设置注册表值触发
+     * @param {String} table 注册表名
+     * @param {String} key 注册表键
+     * @param {Function} action 方法
+     * @returns {Number} 触发器 ID
+     */
+    onSetRegistryValue(table, key = '*', action = () => {}) {
+        table = EchoLiveData.filter('namespace_id', 'pad_namespace', table);
+        const id = this.lastTriggerID++
+        this.event.setRegistryValue.push({
+            id: id,
+            table: table,
+            key: key,
+            action: action
+        });
+        return id;
+    }
+
+    /**
+     * 激活触发
+     * @param {String} event 事件名
+     * @param {String} table 注册表名
+     * @param {String} key 注册表值
+     * @param {Object} [data] 附加数据
+     */
+    trigger(event, table, key, data = {}) {
+        if (this.event[event] === undefined) return;
+        if (event === 'loadedRegistry' || event === 'initRegistry') {
+            if (table !== '*') table = EchoLiveData.filter('namespace_id', 'pad_namespace', table);
+            this.event[event]
+                .filter(e => e.table === table || e.table === '*')
+                .forEach(
+                    e => e.action(table, data)
+                );
+            return;
+        }
+        table = EchoLiveData.filter('namespace_id', 'pad_namespace', table);
+        this.event[event].filter(e => e.table === table && (e.key === key || e.key === '*')).forEach(e => e.action(data, key, table));
+    }
+
+    /**
+     * 清除触发器
+     * @param {String} event 事件名
+     * @param {Number} id 触发器 ID
+     */
+    killTrigger(event, id) {
+        if (this.event[event] === undefined) return;
+        const index = this.event[event].findIndex(e => e.id = id);
+        this.event[event].splice(index, 1);
+    }
+
+    /**
+     * 是否有指定注册表
+     * @param {String} key 注册表名
+     * @returns {Boolean} 结果
+     */
+    hasRegistry(key) {
+        if (typeof key !== 'string') return;
+        key = EchoLiveData.filter('namespace_id', 'pad_namespace', key);
+        let reg = this.registry.get(key);
+        return reg !== undefined;
+    }
+
+    /**
+     * 获取注册表
+     * @param {String} key 注册表名
+     * @returns {Map|undefined} 注册表
+     */
+    getRegistry(key) {
+        if (typeof key !== 'string') return;
+        key = EchoLiveData.filter('namespace_id', 'pad_namespace', key);
+        let reg = this.registry.get(key);
+        if (reg !== undefined && reg instanceof Map) return reg;
+        return undefined;
+    }
+
+    /**
+     * 获取注册表键值对
+     * @param {String} key 注册表名
+     * @returns {Object|undefined} 注册表键值对
+     */
+    getRegistryKeysAndValues(key) {
+        key = EchoLiveData.filter('namespace_id', 'pad_namespace', key);
+        if (!this.loadedRegistry.has(key) && this.hasExtensionLoadQueue(key)) this.resolveExtensionLoadQueue(key);
+        let reg = this.getRegistry(key);
+        if (reg === undefined) return;
+        const keys = Array.from(reg.keys());
+        const values = Array.from(reg.values());
+        return { keys, values };
+    }
+
+    /**
+     * 获取所有同步注册表名
+     * @returns {String[]} 所有同步注册表名
+     */
+    getAllSyncRegistry() {
+        let keys = [];
+        this.getRegistry('root').forEach((v, k) => {
+            if (v.sync && !v.is_function) keys.push(k);
+        });
+        return keys;
+    }
+
+    /**
+     * 获取注册表哈希值
+     * @param {String} key 注册表名
+     * @returns {String|undefined} 注册表哈希值
+     */
+    async getRegistryHash(key) {
+        if (this.registryHashCache.has(key)) return this.registryHashCache.get(key);
+        let reg = this.getRegistry(key);
+        if (reg === undefined) return;
+        const json = JSON.stringify(this.getRegistryKeysAndValues(key));
+        const hash = await EchoLiveSystem.getHash(json).then(h => {
+            this.registryHashCache.set(key, h);
+            return h;
+        });
+        return hash;
+    }
+
+    /**
+     * 获取同步注册表哈希值
+     * @returns {Object} 同步注册表哈希值
+     */
+    async getSyncRegistryHash() {
+        if (this.syncRegistryHashCache !== undefined) return this.syncRegistryHashCache;
+        const keys = this.getAllSyncRegistry();
+        const hash = await Promise.all(keys.map(e => this.getRegistryHash(e)));
+        const totalHash = await EchoLiveSystem.getHash(hash.join(''));;
+        this.syncRegistryHashCache = totalHash;
+        return {
+            hash: totalHash,
+            registry: { keys, hash }
+        };
+    }
+
+    /**
+     * 创建注册表
+     * @param {String} key 注册表名
+     * @returns {Map|undefined} 注册表
+     */
+    createRegistry(key) {
+        key = EchoLiveData.filter('namespace_id', 'pad_namespace', key);
+        if (!EchoLiveData.check('namespace_id', key)) return;
+        if (this.registry.get(key) !== undefined) return;
+        this.registryHashCache.delete(key);
+        return this.registry.set(key, new Map());
+    }
+
+    /**
+     * 创建根注册表
+     * @param {String} namespace 命名空间
+     * @param {Object} map 注册表内容
+     */
+    createRootRegistry(namespace, map = {}) {
+        this.createRegistry(`${namespace}:root`);
+        this.registryHashCache.delete(`${namespace}:root`);
+
+        for (const key in map) {
+            if (Object.prototype.hasOwnProperty.call(map, key)) {
+                const e = map[key];
+                this.setRegistryValue(`${namespace}:root`, key, e);
+                this.createRegistry(key);
+            }
+        }
+    }
+
+    /**
+     * 获取注册表数组
+     * @param {String} key 注册表名
+     * @returns {any[]} 注册表数组
+     */
+    getRegistryArray(key) {
+        let array = [];
+        this.forEach(key, e => {
+            array.push(e);
+        });
+        return array;
+    }
+
+    /**
+     * 获取注册表单位
+     * @param {String} key 注册表名
+     * @returns {EchoLiveRegistryUnit} 注册表单位
+     */
+    getRegistryUnit(key) {
+        let reg = this.getRegistry(key);
+        if (reg === undefined) return;
+        return new EchoLiveRegistryUnit(this, key);
+    }
+
+    /**
+     * 获取注册表内容尺寸
+     * @param {String} key 注册表名
+     * @returns {Number} 注册表内容尺寸
+     */
+    getRegistrySize(key) {
+        let reg = this.getRegistry(key);
+        if (reg === undefined) return;
+        return reg.size;
+    }
+
+    /**
+     * 获取注册表值
+     * @param {String} table 注册表名
+     * @param {String} key 注册表键
+     * @returns {*} 注册表值
+     */
+    getRegistryValue(table, key) {
+        table = EchoLiveData.filter('namespace_id', 'pad_namespace', table);
+        if (!this.loadedRegistry.has(table) && this.hasExtensionLoadQueue(table)) this.resolveExtensionLoadQueue(table);
+        let reg = this.getRegistry(table);
+        if (reg === undefined) return;
+        let value = reg.get(key);
+        if (typeof value === 'object') return JSON.parse(JSON.stringify(value));
+        return reg.get(key);
+    }
+
+    /**
+     * 分页查询数据表值
+     * @param {String} key 注册表名
+     * @param {Number} [page] 页数
+     * @param {Number} [count] 每页条目数
+     * @returns {any[]} 注册表值数组
+     */
+    getRegistryValueForPage(key, page = 1, count = 20) {
+        key = EchoLiveData.filter('namespace_id', 'pad_namespace', key);
+        if (!this.loadedRegistry.has(key) && this.hasExtensionLoadQueue(key)) this.resolveExtensionLoadQueue(key);
+        let reg = this.getRegistry(key);
+        if (reg === undefined) return;
+        const values = Array.from(reg.values());
+        const start = (page - 1) * count;
+        const end = start + count;
+        return {
+            total: values.length,
+            totalPage: Math.ceil(values.length / count),
+            page: page,
+            count: count,
+            values: values.slice(start, end)
+        };
+    }
+
+    /**
+     * 在所有命名空间中获取注册表值
+     * @param {String} table 注册表名
+     * @param {String} key 注册表键
+     * @returns {any[]} 注册表值数组
+     */
+    getAllNamespaceRegistryValue(table, key) {
+        let array = [];
+        this.registry.forEach((v, k) => {
+            let name = EchoLiveData.filter('namespace_id', 'get_id', k);
+            if (name === table) {
+                if (!this.loadedRegistry.has(k) && this.hasExtensionLoadQueue(k)) this.resolveExtensionLoadQueue(k);
+                let v2;
+                if (key !== undefined) {
+                    v2 = this.getRegistryValue(k, key);
+                    if (v2 !== undefined) array.push(v2);
+                } else {
+                    v2 = this.getRegistryArray(k);
+                    array.push(...v2);
+                }
+            }
+        });
+        return array;
+    }
+
+    /**
+     * 获取注册表默认值
+     * @param {String} table 注册表名
+     * @returns {*} 默认值
+     */
+    getRegistryDefaultValue(table) {
+        const id = EchoLiveData.filter('namespace_id', 'get_id', table);
+        let data = this.getRegistryValue(
+            `${ EchoLiveData.filter('namespace_id', 'get_namespace', table) }:root`,
+            id
+        );
+        while (typeof data?.inherit === 'string') {
+            if (!EchoLiveData.check('namespace_id', data.inherit)) break;
+            data = this.getRegistryValue(`${
+                EchoLiveData.filter('namespace_id', 'get_namespace', data.inherit)
+            }:root`, EchoLiveData.filter('namespace_id', 'get_id', data.inherit));
+        }
+        return data?.default_data;
+    }
+
+    /**
+     * 是否为函数注册表
+     * @param {String} table 注册表名
+     * @returns {Boolean} 值
+     */
+    isFunctionRegistry(table) {
+        const identifier = EchoLiveData.filter('namespace_id', 'pad_namespace', table);
+        const id = EchoLiveData.filter('namespace_id', 'get_id', identifier);
+        const namespace = EchoLiveData.filter('namespace_id', 'get_namespace', identifier);
+
+        if (this.isFunctionRegistryCache[identifier] !== undefined) return this.isFunctionRegistryCache[identifier];
+        let data = this.getRegistryValue(
+            `${ namespace }:root`,
+            id
+        );
+        this.isFunctionRegistryCache[identifier] = data?.is_function ? true : false;
+        return this.isFunctionRegistryCache[identifier];
+    }
+
+    /**
+     * 设置注册表值
+     * @param {String} table 注册表名
+     * @param {String} key 注册表键
+     * @param {*} value 注册表值
+     * @param {Object} [data] 附加数据
+     * @param {Boolean} data.fill 强制覆盖
+     * @param {Boolean} data.trigger_disable 禁用触发
+     * @returns {*} 合并后的注册表值
+     */
+    setRegistryValue(table, key, value, data = {}) {
+        if (key === undefined) return;
+        if (typeof value === 'function') return this.setFunctionRegistryValue(table, key, value, data);
+        table = EchoLiveData.filter('namespace_id', 'pad_namespace', table);
+        let reg = this.getRegistry(table);
+        if (reg === undefined) return;
+
+        data = {
+            fill: false,
+            trigger_disable: false,
+            ...data
+        }
+
+        this.registryHashCache.delete(table);
+
+        if (typeof value === 'object') value = JSON.parse(JSON.stringify(value));
+        const defaultData = this.getRegistryDefaultValue(table);
+
+        const __setReg = v2 => {
+            if (typeof defaultData === 'object' && typeof v2 === 'object' && !Array.isArray(v2)) {
+                v2 = EchoLiveRegistry.__deepMerge(defaultData, v2)
+            }
+            reg.set(key, v2);
+            if (!data.trigger_disable) this.trigger('setRegistryValue', table, key, { value: v2 });
+            return v2;
+        }
+
+        let v = reg.get(key);
+        if (!data.fill && typeof v === 'object' && !Array.isArray(v) && typeof value === 'object' && !Array.isArray(value)) {
+            v = EchoLiveRegistry.__deepMerge(v, value);
+            return __setReg(v);
+        } else if (!data.fill && Array.isArray(v)) {
+            if (Array.isArray(value)) {
+                value.forEach(e => {
+                    if (!v.includes(e)) v.push(e);
+                });
+            } else {
+                if (!v.includes(e)) v.push(e);
+            }
+            return __setReg(v);
+        } else {
+            return __setReg(value);
+        }
+    }
+
+    /**
+     * 设置函数注册表值
+     * @param {String} table 注册表名
+     * @param {String} key 注册表键
+     * @param {*} value 注册表值
+     * @param {Object} [data] 附加数据
+     * @param {Boolean} data.trigger_disable 禁用触发
+     * @returns {*} 合并后的注册表值
+     */
+    setFunctionRegistryValue(table, key, value, data = {}) {
+        if (key === undefined) return;
+        if (typeof value !== 'function') return;
+        if (!this.isFunctionRegistry(table)) return;
+        table = EchoLiveData.filter('namespace_id', 'pad_namespace', table);
+        let reg = this.getRegistry(table);
+        if (reg === undefined) return;
+
+        data = {
+            trigger_disable: false,
+            ...data
+        }
+
+        reg.set(key, value);
+        if (!data.trigger_disable) this.trigger('setRegistryValue', table, key, { value: value });
+
+        return value;
+    }
+
+    /**
+     * 导入注册表
+     * @param {String} table 注册表名
+     * @param {String|Function} getKey 注册表键
+     * @param {any[]|Object} data 数据表
+     * @returns {Map} 注册表
+     */
+    loadRegistry(table, getKey, data = []) {
+        table = EchoLiveData.filter('namespace_id', 'pad_namespace', table);
+        let reg = this.getRegistry(table);
+        if (reg === undefined) return;
+        if (typeof data !== 'object') return;
+        const isFunReg = this.isFunctionRegistry(table);
+        this.registryHashCache.delete(table);
+        if (!Array.isArray(data)) data = [data];
+        data.forEach(e => {
+            let key;
+            if (typeof getKey === 'function') {
+                key = getKey(e);
+            } else {
+                key = e[getKey];
+            }
+
+            if (isFunReg) {
+                this.setRegistryValue(table, key, e.value);
+            } else {
+                this.setRegistryValue(table, key, e);
+            }
+        });
+        if (!this.loadedRegistry.has(table)) {
+            this.loadedRegistry.add(table);
+            this.trigger('initRegistry', table, undefined, { value: data });
+        }
+        this.trigger('loadedRegistry', table, undefined, { value: data });
+        if (this.hasExtensionLoadQueue(table)) this.resolveExtensionLoadQueue(table);
+        return this.getRegistry(table);
+    }
+
+    extensionLoadRegistry(root, data, option = {}) {
+        const { hook = 'loaded' } = option;
+        data.forEach(e => {
+            if (e.registry === root && !tilebornSystem.registry.hasRegistry(root)) {
+                tilebornSystem.registry.createRootRegistry(data.meta, e.value);
+            }
+            if (hook === 'now' || this.loadedRegistry.has(e.registry)) {
+                this.resolveExtensionRegistryData(e.registry, e.value);
+            } else {
+                this.addExtensionLoadQueue(e.registry, e.value);
+            }
+        });
+    }
+
+    resolveExtensionRegistryData(table, data) {
+        for (const key in data) {
+            if (Object.prototype.hasOwnProperty.call(data, key)) {
+                const e2 = data[key];
+                tilebornSystem.registry.setRegistryValue(table, key, e2);
+            }
+        }
+    }
+
+    addExtensionLoadQueue(table, data) {
+        const key = EchoLiveData.filter('namespace_id', 'pad_namespace', table);
+        let queue = this.extensionLoadQueue.get(key) ?? [];
+        queue.push(data);
+        this.extensionLoadQueue.set(key, queue);
+    }
+
+    hasExtensionLoadQueue(table) {
+        return this.extensionLoadQueue.has(table);
+    }
+
+    resolveExtensionLoadQueue(table) {
+        const data = this.extensionLoadQueue.get(table);
+        this.extensionLoadQueue.delete(table);
+        data.forEach(e => {
+            this.resolveExtensionRegistryData(table, e);
+        });
+    }
+
+    resolveExtensionLoadQueueAll() {
+        this.extensionLoadQueue.forEach((value, key) => resolveExtensionLoadQueue(key, value));
+        this.extensionLoadQueue.clear();
+    }
+
+    /**
+     * 设置本地化注册表值
+     * @param {Object} langData 本地化键值组
+     * @returns {*} 注册值
+     */
+    setLanguageRegistryValue(langData = {}) {
+        if (langData?.lang === undefined || langData.lang?.code_iso_639_3 === undefined || langData.lang?.code_ietf === undefined) return;
+        return this.setRegistryValue('language', langData.lang.code_iso_639_3, langData);
+    }
+
+    /**
+     * 注册表重定向
+     * @param {String} table 源注册表名
+     * @param {String} table2 目标注册表名
+     * @param {String} key 源注册表键
+     * @param {Function} callback 回调
+     * @returns {*} 回调返回值
+     */
+    registryRedirect(table, table2, key, callback = () => {}) {
+        let value = this.getRegistryValue(table, key);
+        if (value === undefined || (typeof value !== 'string' && typeof value !== 'number')) return callback(false, undefined, value);
+        let regValue = this.getRegistryValue(table2, value);
+        if (value === undefined) return callback(false, undefined, value);
+        return callback(true, regValue, value);
+    }
+
+    /**
+     * 遍历注册表
+     * @param {String} table 注册表名
+     * @param {(value: *, key: String, map: Map) => undefined} action 方法
+     */
+    forEach(table, action = () => {}) {
+        let reg = this.getRegistry(table);
+        if (reg === undefined) return;
+        reg.forEach(action);
+    }
+
+    /**
+     * 遍历注册表获取数组
+     * @param {String} table 注册表名
+     * @param {Function} action 方法
+     * @returns {Array} 数组
+     */
+    forEachGetArray(table, action = () => {}) {
+        let array = [];
+        this.forEach(table, (value, key, map) => {
+            array.push(action(value, key, map));
+        });
+        return array;
+    }
+}
+
+class EchoLiveRegistryUnit {
+    /**
+     * Echo-Live 注册表单位
+     * @param {EchoLiveRegistry} registry 注册表类
+     * @param {String} name 注册表名
+     */
+    constructor(registry, name) {
+        this.registry = registry;
+        this.name = name;
+    }
+
+    get size() {
+        return this.registry.getRegistrySize(this.name);
+    }
+
+    get() {
+        return this.registry.getRegistry(this.name);
+    }
+
+    getArray() {
+        return this.registry.getRegistryArray(this.name);
+    }
+
+    getValue(key) {
+        return this.registry.getRegistryValue(this.name, key);
+    }
+
+    setValue(key, value) {
+        return this.registry.setRegistryValue(this.name, key, value);
+    }
+}
+
+
+class ResourceLoader {
+    constructor(system) {
+        this.system = system;
+        this.registry = system.registry;
+        this.stateMap = new Map();
+
+        this.loadedSrcSet = new Set();
+        this.loadingSrcMap = new Map();
+
+        this.waitQueue = [];
+
+        this.loaders = {
+            script: this._loadScript.bind(this)
+        };
+    }
+
+    init(domain, basePath = '', callback = () => {}) {
+        const list = this.registry.getRegistryArray('script');
+
+        const targets = list.filter(items => {
+            if (items.domain === undefined) return false;
+            const domainList = Array.isArray(items.domain) ? items.domain : [items.domain];
+            for (let i = 0; i < domainList.length; i++) {
+                const e = domainList[i];
+                if (e && domain.startsWith(e)) return true;
+            }
+        });
+
+        const allKeys = new Set();
+
+        targets.forEach(item => {
+            const key = item.name;
+            allKeys.add(key);
+            this._ensureLoadWithDepsByKey(
+                item.name,
+                basePath,
+                new Set()
+            );
+        });
+
+        if (typeof callback === 'function') {
+            this.ready(Array.from(allKeys), basePath)
+                .then(callback);
+        }
+    }
+
+    loadAllRegistry(basePath = '', callback = () => {}) {
+        const allKeys = new Set();
+        const root = this.registry.getRegistryArray('root');
+        root.forEach(e => {
+            if (e.src !== undefined) allKeys.add('registry:' +e.name);
+        });
+
+        this.ready(Array.from(allKeys), basePath)
+            .then(callback);
+    }
+
+    onReady(keys, callback, basePath = '') {
+        tilebornSystem.registry.onLoadedRegistry('script', () => {
+            const finalKeys = new Set(keys);
+            const keyArray = Array.from(finalKeys);
+
+            keyArray.forEach(key => {
+                this._ensureLoadWithDepsByKey(key, basePath, new Set());
+            });
+
+            if (this._checkAllLoaded(keyArray)) {
+                callback();
+                return;
+            }
+
+            this.waitQueue.push({
+                names: keyArray,
+                callback
+            });
+        });
+    }
+
+    ready(names, basePath = '') {
+        return new Promise(resolve => {
+            this.onReady(names, resolve, basePath);
+        });
+    }
+
+    _parseResourceKey(key) {
+        if (key.startsWith('registry:')) {
+            return {
+                type: 'registry',
+                name: key.slice(9)
+            };
+        }
+
+        return {
+            type: 'script',
+            name: key
+        };
+    }
+
+    _ensureLoadWithDepsByKey(key, basePath, visiting) {
+        const { type, name } = this._parseResourceKey(key);
+
+        const visitKey = `${type}:${name}`;
+
+        if (visiting.has(visitKey)) {
+            console.warn(`[ResourceLoader] Circular dependency detected: ${visitKey}`);
+            return;
+        }
+
+        visiting.add(visitKey);
+
+        const item = this._getRegistryItem(type, name);
+        if (!item) {
+            console.warn(`[ResourceLoader] Resource not found: ${visitKey}`);
+            return;
+        }
+
+        const deps = item.dependencies || [];
+        deps.forEach(dep => {
+            this._ensureLoadWithDepsByKey(dep, basePath, visiting);
+        });
+
+        this._ensureLoadByKey(key, basePath);
+
+        visiting.delete(visitKey);
+    }
+
+    _ensureLoadByKey(key, basePath) {
+        const { type, name } = this._parseResourceKey(key);
+
+        const stateKey = `${type}:${name}`;
+
+        const state = this.stateMap.get(stateKey);
+
+        if (state) {
+            if (state.status === 'loaded' || state.status === 'loading') {
+                return;
+            }
+        }
+
+        const item = this._getRegistryItem(type, name);
+        if (!item) return;
+
+        this._initResourceState(stateKey);
+        
+        this._loadByType(type, name, item, basePath);
+    }
+
+    _getRegistryItem(type, name) {
+        if (type === 'script') {
+            return this.registry.getRegistryValue('script', name);
+        }
+
+        if (type === 'registry') {
+            return this.registry.getRegistryValue('root', name);
+        }
+
+        return null;
+    }
+
+    _initResourceState(stateKey) {
+        if (!this.stateMap.has(stateKey)) {
+            this.stateMap.set(stateKey, {
+                status: 'pending',
+                loadedCount: 0,
+                total: 0
+            });
+        }
+    }
+
+    _loadByType(type, name, item, basePath) {
+        if (type === 'script') {
+            this._loadScript(item, basePath, `script:${name}`);
+        }
+
+        if (type === 'registry') {
+            this._loadRegistryScript(item, basePath, `registry:${name}`);
+        }
+    }
+
+    _loadResource(item, basePath) {
+        const loader = this.loaders['script'];
+        if (!loader) return;
+
+        loader(item, basePath);
+    }
+
+    _loadScript(item, basePath, stateKey) {
+        const { src, id, async, defer, type, insert_body } = item;
+        
+        const sources = Array.isArray(src) ? src : [src];
+
+        const state = this.stateMap.get(stateKey);
+        state.status = 'loading';
+        state.total = sources.length;
+
+        sources.forEach(url => {
+            const fullUrl = basePath + url;
+
+            if (this.loadedSrcSet.has(fullUrl)) {
+                this._onSingleLoaded(stateKey);
+                return;
+            }
+
+            if (this.loadingSrcMap.has(fullUrl)) {
+                this.loadingSrcMap.get(fullUrl)
+                    .then(() => this._onSingleLoaded(stateKey))
+                    .catch(() => this._onError(stateKey));
+                return;
+            }
+
+            const promise = new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+
+                script.src = fullUrl;
+
+                if (id) script.id = id;
+                if (type) script.type = type;
+                if (async) script.async = true;
+                if (defer) script.defer = true;
+
+                script.onload = () => {
+                    this.loadedSrcSet.add(fullUrl);
+                    this.loadingSrcMap.delete(fullUrl);
+                    resolve();
+                };
+
+                script.onerror = () => {
+                    this.loadingSrcMap.delete(fullUrl);
+                    reject();
+                };
+
+                document[insert_body? 'body' : 'head'].appendChild(script);
+            });
+
+            this.loadingSrcMap.set(fullUrl, promise);
+
+            promise
+                .then(() => this._onSingleLoaded(stateKey))
+                .catch(() => this._onError(stateKey));
+        });
+    }
+
+    _loadRegistryScript(item, basePath, stateKey) {
+        const { src } = item;
+
+        const sources = Array.isArray(src) ? src : [src];
+
+        const state = this.stateMap.get(stateKey);
+        state.status = 'loading';
+        state.total = sources.length;
+
+        sources.forEach(url => {
+            const fullUrl = basePath + 'res/data/' + url;
+
+            // 复用原有去重逻辑
+            if (this.loadedSrcSet.has(fullUrl)) {
+                this._onSingleLoaded(stateKey);
+                return;
+            }
+
+            if (this.loadingSrcMap.has(fullUrl)) {
+                this.loadingSrcMap.get(fullUrl)
+                    .then(() => this._onSingleLoaded(stateKey))
+                    .catch(() => this._onError(stateKey));
+                return;
+            }
+
+            const promise = new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+
+                script.src = fullUrl;
+
+                script.onload = () => {
+                    this.loadedSrcSet.add(fullUrl);
+                    this.loadingSrcMap.delete(fullUrl);
+                    resolve();
+                };
+
+                script.onerror = () => {
+                    this.loadingSrcMap.delete(fullUrl);
+                    reject();
+                };
+
+                document.head.appendChild(script);
+            });
+
+            this.loadingSrcMap.set(fullUrl, promise);
+
+            promise
+                .then(() => this._onSingleLoaded(stateKey))
+                .catch(() => this._onError(stateKey));
+        });
+    }
+
+    _onSingleLoaded(stateKey) {
+        const state = this.stateMap.get(stateKey);
+        state.loadedCount++;
+
+        if (state.loadedCount >= state.total) {
+            state.status = 'loaded';
+            this._flushQueue();
+        }
+    }
+
+    _onError(stateKey) {
+        const state = this.stateMap.get(stateKey);
+        state.status = 'error';
+        this._flushQueue();
+    }
+
+    _checkAllLoaded(keys) {
+        return keys.every(key => {
+            const { type, name } = this._parseResourceKey(key);
+            const state = this.stateMap.get(`${type}:${name}`);
+            return state && state.status === 'loaded';
+        });
+    }
+
+    _flushQueue() {
+        this.waitQueue = this.waitQueue.filter(task => {
+            if (this._checkAllLoaded(task.names)) {
+                task.callback();
+                return false;
+            }
+            return true;
+        });
+    }
+
+    registerLoader(type, loader) {
+        this.loaders[type] = loader;
+    }
+}
+
+
+
+class EchoLiveHook {
+    constructor() {
+        this.hooks = [];
+        this.lastHookID = -1;
+        this.debug = {
+            log_trigger: false
+        };
+    }
+
+    /**
+     * 创建 Hook
+     * @param {String} name 事件名称
+     * @param {Function} method 方法
+     * @returns {EchoLiveHookUnit} Hook Unit
+     */
+    create(name, method = () => {}) {
+        this.hooks.push({
+            name: name,
+            id: ++this.lastHookID,
+            method: method
+        });
+        return new EchoLiveHookUnit(this.lastHookID, name);
+    }
+
+    /**
+     * 查找 Hook
+     * @param {Number} id Hook ID
+     * @returns {Object} Hook 数据
+     */
+    find(id) {
+        return this.hooks.find(e => e.id === id);
+    }
+
+    /**
+     * 查找 Hook 索引
+     * @param {Number} id Hook ID
+     * @returns {Number} Hook 索引
+     */
+    findIndex(id) {
+        return this.hooks.findIndex(e => e.id === id);
+    }
+
+    /**
+     * 查找 Hook 在事件中的索引
+     * @param {String} name 事件名称
+     * @param {Number} id Hook ID
+     * @returns {Number} Hook 索引
+     */
+    findIndexByName(name, id) {
+        return this.filter(name).findIndex(e => e.id === id);
+    }
+
+    /**
+     * 过滤 Hook
+     * @param {String} name 事件名称
+     * @returns {Object} Hook 数据
+     */
+    filter(name) {
+        return this.hooks.filter(e => e.name === name);
+    }
+
+    /**
+     * 移除 Hook
+     * @param {Number} id Hook ID
+     */
+    remove(id) {
+        const index = this.findIndex(id);
+        if (index === -1) return;
+        this.hooks.splice(index, 1);
+    }
+
+    /**
+     * 清空 Hook
+     * @param {String} [name] 事件名称
+     */
+    clear(name) {
+        if (name === undefined) {
+            this.hooks = [];
+        }
+
+        this.hooks = this.hooks.filter(e => e.name !== e.name);
+    }
+
+    /**
+     * 触发 Hook
+     * @param {String} name 事件名称
+     * @param {Object} [data] 数据 
+     */
+    trigger(name, data = {}) {
+        if (this.debug.log_trigger) console.log('Hook: ' + name, data);
+
+        let r = this.filter(name);
+        r.forEach(e => {
+            e.method({
+                ...data,
+                hook: new EchoLiveHookUnit(e.id, e.name)
+            });
+        });
+    }
+}
+
+
+
+class EchoLiveHookUnit {
+    constructor(id, name) {
+        this.id = id;
+        this.name = name;
+    }
+
+    get parent() {
+        return tilebornSystem.hook;
+    }
+
+    get index() {
+        return this.parent.findIndex(this.id);
+    }
+
+    get indexByName() {
+        return this.parent.findIndexByName(this.name, this.id);
+    }
+
+    remove() {
+        this.parent.remove(this.id);
+    }
+}
+
+
+
+let tilebornSystem = new EchoLiveSystem();
+
+
+
+// 全局可复用类 ////////////////////////////////////////
+
+
+
+class NumberProvider {
+    /**
+     * 数值提供器
+     * @param {Object} payload 载荷
+     * @param {'binomial'|'config'|'constant'|'summands'|'uniform'} [payload.type='uniform'] 类型
+     * @param {Number|NumberProvider} [payload.min=0] 最小值
+     * @param {Number|NumberProvider} [payload.max=1] 最大值
+     * @param {Boolean} [payload.float=false] 使用浮点数
+     * @param {Number} [payload.value] 常数
+     * @param {Number|NumberProvider} [payload.n=0] 进行独立重复的伯努利试验的次数
+     * @param {Number|NumberProvider} [payload.p=0] 每次试验的成功概率
+     * @param {NumberProvider[]} [payload.summands=[]] 数值提供器列表
+     * @param {String} [payload.config] 要读取的配置名称
+     * @param {Number|NumberProvider} [payload.fallback] 读取配置失败的回退值
+     */
+    constructor(payload = {}) {
+        this._payload = payload;
+    }
+
+    get type() {
+        return this._payload?.type ?? 'uniform';
+    }
+
+    _getNumberAttrbute(name, defaultValue, modifier = {}) {
+        const { min, max } = modifier;
+        let n = this._payload[name] ?? defaultValue;
+        if (typeof n === 'object') n = new NumberProvider(n).get();
+        if (typeof n === 'number') {
+            if (typeof min === 'number' && n < min) n = min;
+            if (typeof min === 'number' && n > max) n = max;
+            return n;
+        }
+        return;
+    }
+
+    get min() {
+        return this._getNumberAttrbute('min', 0);
+    }
+
+    get max() {
+        return this._getNumberAttrbute('max', 1);
+    }
+
+    get value() {
+        return this._getNumberAttrbute('value');
+    }
+
+    get n() {
+        return this._getNumberAttrbute('n', 0, { min: 0 });
+    }
+
+    get p() {
+        return this._getNumberAttrbute('p', 0, { min: 0, max: 1 });
+    }
+
+    get summands() {
+        return this._payload?.summands ?? [];
+    }
+
+    static _getConfigNumberByPath(path) {
+        const data = tilebornSystem.config;
+        if (data === undefined) return;
+
+        const segments = path.split('.');
+
+        let current = data;
+
+        for (let i = 0; i < segments.length; i++) {
+            const key = segments[i];
+
+            if (current === undefined || current === null || typeof current !== 'object') return;
+            if (Array.isArray(current)) return;
+            if (!Object.prototype.hasOwnProperty.call(current, key)) return;
+
+            current = current[key];
+        }
+
+        if (typeof current === 'number') return current;
+        if ((typeof current === 'string' || typeof current === 'boolean') && !Number.isNaN(Number(current))) return Number(current);
+        return;
+    }
+
+    get() {
+        if (typeof this._payload !== 'object') return this._payload;
+
+        switch (this.type) {
+            case 'binomial':
+                let count = 0;
+                for (let i = 0; i < this.n; i++) {
+                    count += Math.random() < this.p;
+                }
+                return count;
+
+            case 'config':
+                const configNumber = NumberProvider._getConfigNumberByPath(this._payload?.config);
+                if (typeof configNumber === 'number') return configNumber;
+                if (this._payload?.fallback !== undefined) return new NumberProvider(this._payload?.fallback).get();
+                return;
+
+            case 'constant':
+                return this.value;
+
+            case 'summands':
+                let sum = 0;
+                this.summands.forEach(e => {
+                    sum += new NumberProvider(e).get();
+                });
+                return sum;
+
+            case 'uniform':
+                const max = this.max;
+                const min = this.min;
+                const r = Math.random() * (max - min);
+                if (this._payload?.float) {
+                    return r + min
+                } else {
+                    return Math.floor(r) + min;
+                }
+
+            default:
+                console.warn('NumberProvider type invalid: ' + this.type);
+                return;
+        }
+    }
+}

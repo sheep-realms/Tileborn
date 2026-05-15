@@ -1,0 +1,24 @@
+* {
+    margin: 0;
+    padding: 0;
+}
+
+#tileborn-map {
+    --tile-size: 32px;
+    --map-width: 16;
+    --map-height: 16;
+    display: grid;
+    grid-template-columns: repeat(var(--map-width), var(--tile-size));
+    grid-template-rows: repeat(var(--map-height), var(--tile-size));
+    width: calc(var(--map-width) * var(--tile-size));
+    height: calc(var(--map-height) * var(--tile-size));
+    overflow: hidden;
+    user-select: none;
+}
+
+#tileborn-map .tile {
+    width: var(--tile-size);
+    height: var(--tile-size);
+    box-sizing: border-box;
+    background-color: var(--tile-color, transparent);
+}
