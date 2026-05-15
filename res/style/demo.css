@@ -22,3 +22,16 @@
     box-sizing: border-box;
     background-color: var(--tile-color, transparent);
 }
+
+#tileborn-map .tile:hover {
+    box-shadow: 0 0 2px 1px #fff inset;
+}
+
+#tileborn-map .tile.debug-tile-tick-update-check {
+    animation: debug-tile-tick-update-check 0.25s ease-in 0s 1;
+}
+
+@keyframes debug-tile-tick-update-check {
+    0% { filter: brightness(1.5); }
+    100% { filter: brightness(1); }
+}

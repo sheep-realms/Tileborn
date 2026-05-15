@@ -1,6 +1,7 @@
 class Tileborn {
     constructor() {
         this.tileMaps = new Map();
+        this.activeTileMaps = new Set();
         this.registry = tilebornSystem.registry;
         this.registryMap = {
             tile: {
@@ -9,7 +10,13 @@ class Tileborn {
             },
             tileState: new Map()
         };
+        this.mainloopData = {
+            state: false,
+            delay: 50
+        };
+
         this.event = new EchoLiveEventManager({
+            debug_tile_tick_update_check: {},
             load_map: {},
             tile_update: {}
         });
@@ -50,6 +57,28 @@ class Tileborn {
         });
     }
 
+    launchMainloop() {
+        let startTime = performance.now();
+        this.mainloopData.state = true;
+
+        const tick = (now) => {
+            if (!this.mainloopData.state) return;
+            if (now - startTime >= this.mainloopData.delay) {
+                startTime = now;
+                this.mainloop();
+            }
+            requestAnimationFrame(tick);
+        }
+
+        requestAnimationFrame(tick);
+    }
+
+    mainloop() {
+        this.activeTileMaps.forEach(e => {
+            this.tileMaps.get(e)?.updater.tick();
+        });
+    }
+
     createMap(name, size = [16, 16]) {
         if (this.tileMaps.get(name) !== undefined) return;
         const map = new TilebornMap(this, name, size);
@@ -60,6 +89,8 @@ class Tileborn {
     loadMap(name) {
         const map = this.tileMaps.get(name);
         if (map === undefined) return;
+        this.activeTileMaps.clear();
+        this.activeTileMaps.add(name);
         this.event.emit('load_map', map.getMap());
     }
 
@@ -80,11 +111,13 @@ class Tileborn {
 class TilebornMap {
     constructor(tileborn, name, size = [16, 16]) {
         this.tileborn = tileborn;
+        this.updater = new TilebornMapUpdater(this);
         this.name = name;
         this.size = size;
         this.tiles = new Uint16Array(size[0] * size[1]);
         this.states = new Uint16Array(size[0] * size[1]);
         this.payloads = new Map();
+        this.activeTiles = new Set();
     }
 
     get width() {
@@ -158,6 +191,7 @@ class TilebornMap {
             this.states[index] = state !== undefined ? stateObj.getId(state) : stateObj.defaultId;
         }
 
+        this.updateTile(pos);
         this.tileborn.event.emit('tile_update', this.getTile(pos));
 
         return {
@@ -184,6 +218,62 @@ class TilebornMap {
             let startIndex = this.posToIndex([startX, i]);
             this.tiles.fill(id, startIndex, startIndex + lengthX + 1);
         }
+    }
+
+    updateTile(pos = []) {
+        if (typeof pos === 'number') pos = this.indexToPos(pos);
+        const [ posX, posY ] = pos;
+
+        const getPosIndex = (pos) => {
+            if (pos[0] < 0 || pos[0] >= this.width) return;
+            if (pos[1] < 0 || pos[1] >= this.height) return;
+            return this.posToIndex(pos);
+        }
+
+        const updateList = [
+            [posX, posY - 1],
+            [posX + 1, posY],
+            [posX, posY + 1],
+            [posX - 1, posY],
+            [posX - 1, posY - 1],
+            [posX + 1, posY - 1],
+            [posX + 1, posY + 1],
+            [posX - 1, posY + 1]
+        ];
+
+        updateList.forEach(e => {
+            const i = getPosIndex(e);
+            if (typeof i === 'number') this.activeTiles.add(i);
+        });
+    }
+
+    dumpActiveTiles() {
+        let list = []
+        this.activeTiles.forEach(e => list.push(e));
+        this.activeTiles.clear();
+        return list;
+    }
+}
+
+class TilebornMapUpdater {
+    constructor(tileMap) {
+        this.tileMap = tileMap;
+    }
+
+    tick() {
+        // 方格更新
+        const activeTiles = this.tileMap.dumpActiveTiles() ?? [];
+
+        activeTiles.forEach(index => {
+            this.resolveTileUpdate(index);
+        });
+    }
+
+    resolveTileUpdate(index) {
+        this.tileMap.tileborn.event.emit('debug_tile_tick_update_check', index);
+        // TODO: 先假装这里已经搞定了
+        // 如有必要继续更新
+        // this.tileMap.updateTile(index);
     }
 }
 

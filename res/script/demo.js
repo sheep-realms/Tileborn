@@ -4,12 +4,20 @@ let tileborn = new Tileborn();
 
 const $tileborn = $('#tileborn');
 
+$(document).on('animationend', '.debug-tile-tick-update-check', function() {
+    $(this).removeClass('debug-tile-tick-update-check');
+});
+
 tileborn.on('load_map', function(map) {
     $tileborn.html(TileComponent.map(map));
 });
 
 tileborn.on('tile_update', function(tile) {
     $(`#tileborn .tile[data-index="${ tile.index }"]`).replaceWith(TileComponent.tile(tile));
+});
+
+tileborn.on('debug_tile_tick_update_check', function(index) {
+    $(`#tileborn .tile[data-index="${ index }"]`).addClass('debug-tile-tick-update-check');
 });
 
 tileborn.tileMaps.get('example').fillTile([0, 0], [15, 15], 'grass');
