@@ -17,6 +17,7 @@ class Tileborn {
 
         this.event = new EchoLiveEventManager({
             debug_tile_tick_update_check: {},
+            debug_tile_random_tick_check: {},
             load_map: {},
             tile_update: {}
         });
@@ -145,19 +146,20 @@ class TilebornMap {
     }
 
     getTile(pos = []) {
-        const index = typeof pos === 'number' ? pos : this.posToIndex(pos);
+        if (typeof pos === 'number') pos = this.indexToPos(pos);
+        const index = this.posToIndex(pos);
         const id = this.tiles[index];
         const stateId = this.states[index];
         const data = this.tileborn.getTileData(id);
         const name = data.name;
         const state = this.tileborn.getTileState(name)?.getState(stateId);
         return {
+            ...data,
             index,
             id,
             stateId,
             name,
             state,
-            color: data.color,
             pos: {
                 x: pos[0],
                 y: pos[1],
@@ -258,6 +260,7 @@ class TilebornMap {
 class TilebornMapUpdater {
     constructor(tileMap) {
         this.tileMap = tileMap;
+        this.randomTick = 3;
     }
 
     tick() {
@@ -267,6 +270,21 @@ class TilebornMapUpdater {
         activeTiles.forEach(index => {
             this.resolveTileUpdate(index);
         });
+
+        // 随机刻
+        const randomTickCount = Math.floor(this.tileMap.length * (this.randomTick / 256));
+        const getRandomIndex = (length) => {
+            return Math.floor(Math.random() * length);
+        }
+        let randomTickCheckIndex = new Set();
+
+        for (let i = 0; i < randomTickCount; i++) {
+            randomTickCheckIndex.add(getRandomIndex(this.tileMap.length));
+        }
+
+        randomTickCheckIndex.forEach(e => {
+            this.checkRandomTickTile(e);
+        });
     }
 
     resolveTileUpdate(index) {
@@ -274,6 +292,11 @@ class TilebornMapUpdater {
         // TODO: 先假装这里已经搞定了
         // 如有必要继续更新
         // this.tileMap.updateTile(index);
+    }
+
+    checkRandomTickTile(index) {
+        this.tileMap.tileborn.event.emit('debug_tile_random_tick_check', index);
+        
     }
 }
 

@@ -17,10 +17,22 @@
 }
 
 #tileborn-map .tile {
+    /* --tileset-url: url('tiles.png'); */
+    --tileset-columns: 16;
+    --tileset-rows: 16;
+    --tileset-x: 0;
+    --tileset-y: 0;
     width: var(--tile-size);
     height: var(--tile-size);
     box-sizing: border-box;
     background-color: var(--tile-color, transparent);
+    background-image: var(--tileset-url, unset);
+    background-size: calc(256px * 2);
+    background-repeat: no-repeat;
+    background-position:
+        calc(-1 * var(--tileset-x) * var(--tile-size))
+        calc(-1 * var(--tileset-y) * var(--tile-size));
+    image-rendering: pixelated;
 }
 
 #tileborn-map .tile:hover {
@@ -34,4 +46,13 @@
 @keyframes debug-tile-tick-update-check {
     0% { filter: brightness(1.5); }
     100% { filter: brightness(1); }
+}
+
+#tileborn-map .debug-tile-random-tick-check {
+    animation: debug-tile-random-tick-check 0.05s ease-in 0s 1;
+}
+
+@keyframes debug-tile-random-tick-check {
+    0% { box-shadow: 0 0 2px 1px #ff0 inset; }
+    100% { box-shadow: 0 0 0px 0px #ff0 inset; }
 }
