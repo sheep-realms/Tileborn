@@ -16,7 +16,7 @@ $(document).on('animationend', '.debug-tile-random-tick-check', function() {
 $(document).on('click', '.tile', function() {
     const x = $(this).data('pos-x');
     const y = $(this).data('pos-y');
-    exampleMap.setTile([x, y], 'stone');
+    exampleMap.setTile([x, y], 'lab_wire');
 });
 
 tileborn.on('load_map', function(map) {
@@ -35,7 +35,7 @@ tileborn.on('debug_tile_tick_update_check', function(index) {
 //     $(`#tileborn .tile[data-index="${ index }"]`).addClass('debug-tile-random-tick-check');
 // });
 
-tileborn.tileMaps.get('example').fillTile([0, 0], [15, 15], 'grass');
+tileborn.tileMaps.get('example').fillTile([0, 0], [15, 15], 'lab_tile');
 
 tileborn.loadMap('example');
 

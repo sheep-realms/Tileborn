@@ -5,6 +5,16 @@ tilebornSystem.registry.init([
         sync: true,
         src: 'tile.js',
         default_data: {
+            name: undefined,
+            face_type: 'none',
+            tileset: {}
+        }
+    }, {
+        name: 'tile_model',
+        unique_key: 'name',
+        sync: true,
+        src: 'tile_model.js',
+        default_data: {
             name: undefined
         }
     }, {

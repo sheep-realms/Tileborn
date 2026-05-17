@@ -33,14 +33,42 @@ tilebornSystem.registry.loadRegistry('tile', 'name', [
         }
     }, {
         name: 'tileborn:lava',
-        color: '#f59e0b'
+        color: '#f59e0b',
+        tileset: {
+            src: 'basic.png',
+            pos: [4, 0]
+        }
     }, {
-        name: 'tileborn:wire',
+        name: 'tileborn:sand',
+        color: '#ece2be',
+        tileset: {
+            src: 'basic.png',
+            pos: [5, 0]
+        }
+    }, {
+        name: 'tileborn:lab_tile',
+        color: '#94a3b8',
+        tileset: {
+            src: 'lab.png',
+            pos: [0, 0]
+        }
+    }, {
+        name: 'tileborn:lab_wire',
         states: 'tileborn:wire',
-        color: '#06b6d4'
+        color: '#1a7e99',
+        tileset: {
+            src: 'lab.png',
+            pos: [0, 2],
+            model: 'tileborn:wire'
+        }
     }, {
-        name: 'tileborn:lever',
+        name: 'tileborn:lab_power_lever',
         states: 'tileborn:lever',
-        color: '#155e75'
+        color: '#bf7d00',
+        face_type: 'all',
+        tileset: {
+            src: 'lab.png',
+            pos: [1, 4]
+        }
     }
 ]);

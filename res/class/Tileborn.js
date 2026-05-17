@@ -8,7 +8,8 @@ class Tileborn {
                 nameToId: new Map(),
                 idToDef: []
             },
-            tileState: new Map()
+            tileState: new Map(),
+            tileModel: new Map()
         };
         this.mainloopData = {
             state: false,
@@ -35,10 +36,13 @@ class Tileborn {
     }
 
     #serializationData() {
+        // 方格 ID 序列化
         this.registryMap.tile.idToDef = this.registry.getRegistryArray('tile');
         this.registryMap.tile.idToDef.forEach((e, i) => {
             this.registryMap.tile.nameToId.set(e.name, i);
         });
+
+        // 方格状态序列化
         this.registry.forEach('tile_state', e => {
             let tileStateDef = {};
             let tileStateDefaultValue = {};
@@ -55,6 +59,18 @@ class Tileborn {
                 tileStateDefaultValue[key] = tileStateValueDef.default_value;
             }
             this.registryMap.tileState.set(e.name, new TileState(tileStateDef, tileStateDefaultValue));
+        });
+
+        // 方格模型序列化
+        this.registry.forEach('tile_model', e => {
+            let modelSet = [];
+            for (const key in e.variants) {
+                if (!Object.hasOwn(e.variants, key)) continue;
+                const v = e.variants[key];
+                const stateId = this.getTileState(e.reference ?? e.name).getId(Tileborn.tileStateStringToObject(key));
+                modelSet[stateId] = v;
+            }
+            this.registryMap.tileModel.set(e.name, modelSet);
         });
     }
 
@@ -107,6 +123,25 @@ class Tileborn {
     getTileState(name) {
         return this.registryMap.tileState.get(name);
     }
+
+    getTileModel(name, stateId) {
+        return this.registryMap.tileModel.get(name)[stateId];
+    }
+
+    static tileStateStringToObject(stateString = '') {
+        const stateList = stateString.split(',');
+        let output = {};
+
+        for (let i = 0; i < stateList.length; i++) {
+            const kv = stateList[i].split('=');
+            if (kv.length !== 2) continue;
+            const key = kv[0].trim();
+            const value = kv[1].trim();
+            output[key] = value;
+        }
+
+        return output;
+    }
 }
 
 class TilebornMap {
@@ -117,6 +152,7 @@ class TilebornMap {
         this.size = size;
         this.tiles = new Uint16Array(size[0] * size[1]);
         this.states = new Uint16Array(size[0] * size[1]);
+        this.faces = new Uint8Array(size[0] * size[1]);
         this.payloads = new Map();
         this.activeTiles = new Set();
     }
@@ -152,7 +188,11 @@ class TilebornMap {
         const stateId = this.states[index];
         const data = this.tileborn.getTileData(id);
         const name = data.name;
-        const state = this.tileborn.getTileState(name)?.getState(stateId);
+        const state = this.tileborn.getTileState(data.states)?.getState(stateId);
+        let model = {};
+        if (data.tileset?.model) {
+            model = this.tileborn.getTileModel(data.tileset.model, stateId);
+        }
         return {
             ...data,
             index,
@@ -163,7 +203,8 @@ class TilebornMap {
             pos: {
                 x: pos[0],
                 y: pos[1],
-            }
+            },
+            model
         }
     }
 
@@ -310,6 +351,7 @@ class TileState {
         this.#keys = Object.keys(definition).sort();
         this.#valueMaps = new Map();
         this.#radixes = [];
+        this.defaultValue = defaultValue;
         this.defaultId = 0;
 
         let multiplier = 1;
@@ -344,6 +386,8 @@ class TileState {
      * 状态对象 -> 状态ID
      */
     getId(state) {
+        if (typeof state === 'string') state = Tileborn.tileStateStringToObject(state);
+        state = { ...this.defaultValue, ...state };
         let id = 0;
 
         for (let i = 0; i < this.#keys.length; i++) {

@@ -15,7 +15,18 @@ class TileComponent {
     }
 
     static tile(data) {
-        const rotation = [0, 90, 180, 270]
+        const rotation = [0, 90, 180, 270];
+
+        let posX = data.tileset.pos[0];
+        let posY = data.tileset.pos[1];
+
+        if (data.tileset.model) {
+            if (Array.isArray(data.model?.offset)) {
+                posX += Math.max(data.model.offset[0], 0);
+                posY += Math.max(data.model.offset[1], 0);
+            }
+        }
+
         return `<div
             class="tile"
             data-id="${data.id}"
@@ -25,7 +36,7 @@ class TileComponent {
             data-pos-y="${data.pos.y}"
             style="
                 --tile-color: ${ data.color ? data.color : 'transparent' };
-                ${ data.tileset?.src ? `--tileset-url: url('../../assets/texture/${data.tileset.src}'); --tileset-x: ${data.tileset.pos[0]}; --tileset-y: ${data.tileset.pos[1]};` : '' }
+                ${ data.tileset?.src ? `--tileset-url: url('../../assets/texture/${data.tileset.src}'); --tileset-x: ${posX}; --tileset-y: ${posY};` : '' }
                 ${ data.tileset?.random_rotation ? `transform: rotate(${rotation[TileComponent.coordRotation(data.pos.x, data.pos.y)]}deg);` : '' }
             "
         ></div>`
