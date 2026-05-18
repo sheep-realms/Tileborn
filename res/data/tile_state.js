@@ -1,18 +1,50 @@
 tilebornSystem.registry.loadRegistry('tile_state', 'name', [
     {
-        name: 'tileborn:wire',
+        name: 'tileborn:hidden_power_wire',
         value: {
-            east: 'tileborn:wire_connect',
-            north: 'tileborn:wire_connect',
-            powered: 'tileborn:boolean',
-            south: 'tileborn:wire_connect',
-            west: 'tileborn:wire_connect'
+            axis: 'axis',
+            powered: 'boolean'
         }
     }, {
-        name: 'tileborn:lever',
+        name: 'tileborn:power_equipment',
         value: {
-            facing: 'tileborn:facing',
-            powered: 'tileborn:boolean'
+            powered: 'boolean'
+        }
+    }, {
+        name: 'tileborn:power_hourglass',
+        value: {
+            level: 'level_10'
+        }
+    }, {
+        name: 'tileborn:power_lever',
+        value: {
+            facing: 'facing',
+            powered: 'boolean'
+        }
+    }, {
+        name: 'tileborn:power_switch',
+        value: {
+            facing: 'facing',
+            switch: 'boolean',
+            left_powered: 'boolean',
+            right_powered: 'boolean'
+        }
+    }, {
+        name: 'tileborn:power_wire',
+        value: {
+            east: 'wire_connect',
+            north: 'wire_connect',
+            powered: 'boolean',
+            south: 'wire_connect',
+            west: 'wire_connect'
+        }
+    }, {
+        name: 'tileborn:wire',
+        value: {
+            east: 'wire_connect',
+            north: 'wire_connect',
+            south: 'wire_connect',
+            west: 'wire_connect'
         }
     }
 ]);

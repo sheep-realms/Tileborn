@@ -11,6 +11,9 @@ class Tileborn {
             tileState: new Map(),
             tileModel: new Map()
         };
+        this.cache = {
+            tagValues: new Map()
+        },
         this.mainloopData = {
             state: false,
             delay: 50
@@ -128,6 +131,29 @@ class Tileborn {
         return this.registryMap.tileModel.get(name)[stateId];
     }
 
+    getTileTagValues(name) {
+        name = EchoLiveData.filter('namespace_id', 'pad_namespace', name);
+        const values = this.cache.tagValues.get(name);
+        if (values !== undefined) return values;
+
+        const tag = this.registry.getRegistryValue('tile_tag', name);
+        let output = [];
+        tag.values.forEach(e => {
+            if (e.startsWith('#')) {
+                output.push(...this.getTileTagValues(e.substring(1)));
+            } else {
+                output.push(e);
+            }
+        });
+        this.cache.tagValues.set(name, output);
+        return output;
+    }
+
+    checkTileIncludesTag(tileName, tag) {
+        const values = this.getTileTagValues(tag);
+        return values.includes(tileName);
+    }
+
     static tileStateStringToObject(stateString = '') {
         const stateList = stateString.split(',');
         let output = {};
@@ -152,7 +178,6 @@ class TilebornMap {
         this.size = size;
         this.tiles = new Uint16Array(size[0] * size[1]);
         this.states = new Uint16Array(size[0] * size[1]);
-        this.faces = new Uint8Array(size[0] * size[1]);
         this.payloads = new Map();
         this.activeTiles = new Set();
     }
@@ -193,7 +218,8 @@ class TilebornMap {
         if (data.tileset?.model) {
             model = this.tileborn.getTileModel(data.tileset.model, stateId);
         }
-        return {
+
+        let output = {
             ...data,
             index,
             id,
@@ -205,7 +231,132 @@ class TilebornMap {
                 y: pos[1],
             },
             model
+        };
+        output.getFacing = () => this.getTileFacingForTileData(output);
+        output.getNeighbor = (direction = 'all') => this.getTileNeighbor(pos, direction);
+        output.setTile = (name, state, option = {}) => this.setTile(pos, name, state, option);
+        output.changeState = (state, option = {}) => this.changeTileState(pos, state, option);
+        output.interaction = (reverse = false, alt = false) => {
+            const handlerName = output.payload?.interaction;
+            if (handlerName === undefined) return;
+            const handler = this.tileborn.registry.getRegistryValue('tile_payload', handlerName);
+            return handler?.(output, reverse, alt);
+        };
+        return output;
+    }
+    
+    getTileFacing(pos = []) {
+        const tile = this.getTile(pos);
+        return tile.getFacing();
+    }
+
+    getTileFacingForTileData(tile) {
+        if (tile.face_type === 'all') {
+            return tile.state.facing;
+        } else if (tile.face_type === 'axis') {
+            const axisMap = {
+                x: 'north',
+                y: 'east'
+            };
+            return axisMap[tile.state.axis];
+        } else {
+            return 'north';
         }
+    }
+
+    getTileNeighbor(pos = [], direction = 'all') {
+        const tile = this.getTile(pos);
+
+        if (!tile) {
+            return null;
+        }
+
+        const facing = tile.getFacing();
+
+        const [x, y] = pos;
+
+        // 世界方向偏移
+        const offsets = {
+            north: [0, -1],
+            east: [1, 0],
+            south: [0, 1],
+            west: [-1, 0]
+        };
+
+        // 相对方向映射
+        const relativeDirections = {
+            north: {
+                front: 'north',
+                right: 'east',
+                back: 'south',
+                left: 'west'
+            },
+
+            east: {
+                front: 'east',
+                right: 'south',
+                back: 'west',
+                left: 'north'
+            },
+
+            south: {
+                front: 'south',
+                right: 'west',
+                back: 'north',
+                left: 'east'
+            },
+
+            west: {
+                front: 'west',
+                right: 'north',
+                back: 'east',
+                left: 'south'
+            }
+        };
+
+        // 获取单个方向邻居
+        const getNeighbor = (dir) => {
+            const offset = offsets[dir];
+
+            if (!offset) {
+                return null;
+            }
+
+            const nx = x + offset[0];
+            const ny = y + offset[1];
+
+            // 地图边界检查
+            if (
+                nx < 0 ||
+                ny < 0 ||
+                nx >= this.width ||
+                ny >= this.height
+            ) {
+                return null;
+            }
+
+            return this.getTile([nx, ny]);
+        };
+
+        // 获取全部方向
+        if (direction === 'all') {
+            let result = {};
+
+            for (const dir of ['north', 'east', 'south', 'west']) {
+                const neighbor = getNeighbor(dir);
+
+                result[dir] = neighbor;
+            }
+
+            return result;
+        }
+
+        // 相对方向转绝对方向
+        const absoluteDirection =
+            relativeDirections[facing]?.[direction]
+            ?? direction;
+
+        return getNeighbor(absoluteDirection);
     }
 
     getMap() {
@@ -223,7 +374,9 @@ class TilebornMap {
         };
     }
 
-    setTile(pos = [], name, state) {
+    setTile(pos = [], name, state, option = {}) {
+        const { tile_update_disabled = false } = option;
+
         const id = typeof name === 'number' ? name : this.tileborn.getTileId(name);
         if (typeof id !== 'number') return;
         const data = this.tileborn.getTileData(id);
@@ -234,7 +387,7 @@ class TilebornMap {
             this.states[index] = state !== undefined ? stateObj.getId(state) : stateObj.defaultId;
         }
 
-        this.updateTile(pos);
+        if (!tile_update_disabled) this.updateTile(pos);
         this.tileborn.event.emit('tile_update', this.getTile(pos));
 
         return {
@@ -263,6 +416,16 @@ class TilebornMap {
         }
     }
 
+    changeTileState(pos = [], state = {}, option = {}) {
+        const tile = this.getTile(pos);
+        this.setTile(pos, tile.name, { ...tile.state, ...state }, option);
+    }
+
+    interactionTile(pos = [], reverse = false, alt = false) {
+        const tile = this.getTile(pos);
+        return tile.interaction(reverse, alt);
+    }
+
     updateTile(pos = []) {
         if (typeof pos === 'number') pos = this.indexToPos(pos);
         const [ posX, posY ] = pos;
@@ -274,6 +437,7 @@ class TilebornMap {
         }
 
         const updateList = [
+            [posX, posY],
             [posX, posY - 1],
             [posX + 1, posY],
             [posX, posY + 1],
@@ -295,6 +459,40 @@ class TilebornMap {
         this.activeTiles.forEach(e => list.push(e));
         this.activeTiles.clear();
         return list;
+    }
+
+    checkTileIncludesTag(pos = [], tag) {
+        const tile = this.getTile(pos);
+        return this.checkTileIncludesTagForTileData(tile, tag);
+    }
+
+    checkTileIncludesTagForTileData(tile, tag) {
+        const values = this.tileborn.getTileTagValues(tag);
+        if (values.includes(tile.name)) return true;
+        const matched = values.filter(e => e.startsWith(tile.name + '|'));
+        let states = [];
+        matched.forEach(e => {
+            let s = e.split('|')[1];
+            if (s) states.push(s);
+        })
+
+        for (let i = 0; i < states.length; i++) {
+            const e = states[i];
+            let state = Tileborn.tileStateStringToObject(e);
+            let approved = true;
+            // debugger
+            for (const key in state) {
+                if (!Object.hasOwn(state, key)) continue;
+                const element = state[key];
+                if (tile.state[key] !== element) {
+                    approved = false;
+                    break;
+                }
+            }
+            if (approved) return true;
+        }
+
+        return false;
     }
 }
 
@@ -330,9 +528,29 @@ class TilebornMapUpdater {
 
     resolveTileUpdate(index) {
         this.tileMap.tileborn.event.emit('debug_tile_tick_update_check', index);
-        // TODO: 先假装这里已经搞定了
-        // 如有必要继续更新
-        // this.tileMap.updateTile(index);
+        const tile = this.tileMap.getTile(index);
+
+        if (typeof tile.payload?.update === 'string') {
+            const handler = this.tileMap.tileborn.registry.getRegistryValue('tile_payload', tile.payload.update);
+            handler?.({
+                tile,
+                map: this.tileMap,
+                tileborn: this.tileMap.tileborn,
+                getPayload: (name) => this.tileMap.tileborn.registry.getRegistryValue('tile_payload', name),
+                resolve: (option = {}) => {
+                    const {
+                        update_tile = false,
+                        update_texture = false
+                    } = option;
+                    if (update_tile) {
+                        this.tileMap.updateTile(index);
+                    }
+                    if (update_texture) {
+                        this.tileMap.tileborn.event.emit('tile_update', tile);
+                    }
+                }
+            });
+        }
     }
 
     checkRandomTickTile(index) {
